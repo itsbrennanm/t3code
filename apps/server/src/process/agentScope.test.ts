@@ -325,6 +325,34 @@ describe("AgentScope service", () => {
     );
   });
 
+  it.effect("publishes ownership only for dedicated nonterminal scopes", () =>
+    withFakeSystemd(({ scope, stateDir }) =>
+      Effect.gen(function* () {
+        const agent = yield* scope.wrap({
+          command: "agent",
+          args: [],
+          name: "t",
+          threadId: "mcp:owner",
+        });
+        expect(agent.args).toContain(
+          `--property=Description=T3AgentOwnership:${JSON.stringify({ version: 1, thread_id: "mcp:owner", server_slice: ownedAgentSlice(stateDir) })}`,
+        );
+        for (const input of [{ shared: true }, { survivesRestart: true }]) {
+          const protectedScope = yield* scope.wrap({
+            command: "agent",
+            args: [],
+            name: "t",
+            threadId: "owner",
+            ...input,
+          });
+          expect(protectedScope.args.some((arg) => arg.startsWith("--property=Description="))).toBe(
+            false,
+          );
+        }
+      }),
+    ),
+  );
+
   it.effect("leaves a quiet slice alone", () =>
     withFakeSystemd(({ scope, calls }) =>
       Effect.gen(function* () {

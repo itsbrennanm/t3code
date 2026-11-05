@@ -20,6 +20,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import { OwnedWorkerJobs } from "../process/ownedWorkerJobs.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
@@ -273,6 +274,7 @@ it.effect.each(storageCases)(
       assert.instanceOf(missingThread, ProjectionStore.ProjectionStoreThreadNotFoundError);
 
       const calls: string[] = [];
+      const cancellations: number[] = [];
       const layerSessions = Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
         get: () =>
           Effect.succeedSome({
@@ -343,11 +345,23 @@ it.effect.each(storageCases)(
         });
         yield* control.interrupt({ threadId, providerThreadId, providerTurnId, providerSessionId });
         assert.deepEqual(calls, ["interrupt", "Use the smaller fix.", "reply", "interrupt"]);
+        assert.lengthOf(cancellations, 2);
+        assert.equal(cancellations[1], DateTime.toEpochMillis(now) / 1_000);
       }).pipe(
         Effect.provide(
-          Layer.merge(ProviderTurnControlService.layer, RuntimeRequestService.layer).pipe(
-            Layer.provide(layerSessions),
-          ),
+          Layer.merge(
+            ProviderTurnControlService.layer.pipe(
+              Layer.provide(
+                Layer.succeed(OwnedWorkerJobs, {
+                  cancel: (_owner, cutoff) =>
+                    Effect.sync(() => {
+                      cancellations.push(cutoff);
+                    }),
+                }),
+              ),
+            ),
+            RuntimeRequestService.layer,
+          ).pipe(Layer.provide(layerSessions)),
         ),
       );
     }).pipe(Effect.provide(Layer.merge(storeLayer, SqlitePersistence.layerMemory))),
