@@ -9,7 +9,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
-import type * as DateTime from "effect/DateTime";
+import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -17,6 +17,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { OwnedWorkerJobs } from "../process/ownedWorkerJobs.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 
@@ -90,6 +91,7 @@ export const layer: Layer.Layer<
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const workerJobs = yield* OwnedWorkerJobs;
 
     const load = Effect.fn("ProviderTurnControlService.load")(function* (input: {
       readonly threadId: ThreadId;
@@ -182,6 +184,17 @@ export const layer: Layer.Layer<
       interrupt: Effect.fn("ProviderTurnControlService.interrupt")(
         function* (input) {
           const loaded = yield* load({ ...input, operation: "interrupt" });
+          const completed = loaded.providerTurn.completedAt;
+          const cutoff =
+            completed !== null
+              ? DateTime.toEpochMillis(completed) / 1_000
+              : loaded.providerTurn.status === "running"
+                ? (yield* Clock.currentTimeMillis) / 1_000
+                : undefined;
+          const cancelWorkerJobs =
+            input.subagent === undefined && cutoff !== undefined
+              ? workerJobs.cancel(input.threadId, cutoff)
+              : Effect.void;
           const session = Option.isSome(loaded.session)
             ? loaded.session
             : yield* sessions.get(input.providerSessionId);
@@ -194,6 +207,7 @@ export const layer: Layer.Layer<
                 cause: "No live provider session can confirm this subagent's outcome.",
               });
             }
+            yield* cancelWorkerJobs;
             return;
           }
           if (input.subagent !== undefined) {
@@ -214,11 +228,13 @@ export const layer: Layer.Layer<
             });
           }
           // Settled turns still reach adapters, which alone know whether background work remains.
-          yield* session.value.interruptTurn({
-            providerThread: loaded.providerThread,
-            providerTurnId: loaded.providerTurn.id,
-            requestRuntimeRestart: true,
-          });
+          yield* session.value
+            .interruptTurn({
+              providerThread: loaded.providerThread,
+              providerTurnId: loaded.providerTurn.id,
+              requestRuntimeRestart: true,
+            })
+            .pipe(Effect.ensuring(cancelWorkerJobs));
           // Use real time; ingestion fibers do not advance TestClock and would leave Stop blocked.
           yield* Effect.gen(function* () {
             const deadline = (yield* Clock.currentTimeMillis) + 2_000;

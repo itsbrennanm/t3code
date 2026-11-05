@@ -14,11 +14,21 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
 
 const AGENT_SLICE = "app-t3code-agents.slice";
+const encodeOwnership = Schema.encodeSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      version: Schema.Literal(1),
+      thread_id: Schema.String,
+      server_slice: Schema.String,
+    }),
+  ),
+);
 
 export function ownedAgentSlice(stateDir: string): string {
   const hash = NodeCrypto.createHash("sha256").update(stateDir).digest("hex").slice(0, 12);
@@ -360,6 +370,11 @@ export const make = Effect.gen(function* () {
         // unload the unit even when it fails.
         options: [
           STOP_TIMEOUT_OPTION,
+          ...(owned && survivesRestart !== true && shared !== true
+            ? [
+                `--property=Description=T3AgentOwnership:${encodeOwnership({ version: 1, thread_id: threadId, server_slice: ownedSlice })}`,
+              ]
+            : []),
           ...(scope.supportsOomPolicy
             ? [`--property=OOMPolicy=${continuing ? "continue" : "stop"}`]
             : []),
